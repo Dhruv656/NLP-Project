@@ -2,7 +2,6 @@ from pathlib import Path
 import re
 import numpy as np
 import pandas as pd
-from collections import Counter
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
@@ -26,14 +25,52 @@ def find_project_root():
                 return parent
     return ROOT
 
-PROJECT_ROOT = find_project_root()
-out_path = PROJECT_ROOT / 'job_market_nlp_analysis.ipynb'
 
-df = pd.read_csv(PROJECT_ROOT / 'master_jobs_dataset.csv')
+def normalize_text(text):
+    text = str(text).lower()
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-for col in ['job_title', 'company', 'location', 'description', 'tags', 'category', 'workplace', 'department', 'type']:
-    if col in df.columns:
-        df[col] = df[col].fillna('').astype(str)
+
+def tokenize(text):
+    return [token for token in normalize_text(text).split() if token]
+
+
+def build_text_for_nlp(row):
+    parts = [
+        row.get('job_title', ''),
+        row.get('category', ''),
+        row.get('description', ''),
+        row.get('tags', ''),
+        row.get('location', ''),
+        row.get('department', ''),
+        row.get('workplace', ''),
+        row.get('type', ''),
+    ]
+    cleaned = []
+    seen = set()
+    for part in parts:
+        text = str(part).strip()
+        if not text:
+            continue
+        for token in normalize_text(text).split():
+            if token not in seen:
+                seen.add(token)
+                cleaned.append(token)
+    return ' '.join(cleaned)
+
+
+def remove_stopwords(tokens):
+    stop_words = {
+        'the', 'and', 'for', 'with', 'in', 'on', 'of', 'to', 'a', 'an', 'is', 'are', 'be',
+        'this', 'that', 'our', 'you', 'your', 'will', 'work', 'jobs', 'job', 'remote', 'team',
+        'company', 'role', 'skills', 'experience', 'using', 'developing', 'develop', 'data',
+        'science', 'engineer', 'engineering', 'software', 'developer', 'analyst', 'manager',
+        'product', 'business', 'technical', 'senior', 'junior', 'lead', 'principal', 'full',
+        'time', 'at', 'we', 'can', 'help', 'new', 'up', 'from', 'into', 'their', 'about'
+    }
+    return [token for token in tokens if token not in stop_words and len(token) > 2]
 
 
 def parse_salary_value(value):
@@ -42,182 +79,237 @@ def parse_salary_value(value):
     text = str(value).strip().lower()
     if not text:
         return np.nan
-    nums = re.findall(r'\d+', text)
+    nums = re.findall(r'\d+(?:\.\d+)?', text)
     if not nums:
         return np.nan
-    value_num = float(nums[0])
+    amount = float(nums[0])
     if 'k' in text:
-        value_num *= 1000
-    return value_num
+        amount *= 1000
+    if 'm' in text:
+        amount *= 1000000
+    return amount
 
 
-def estimate_salary(row):
-    title = str(row['job_title']).lower()
-    category = str(row['category']).lower()
-    description = str(row['description']).lower()
-    text = f"{title} {category} {description}".lower()
-    row_index = int(getattr(row, 'name', 0))
-    variation = (row_index % 6) * 3500 - 7000
+def estimate_salary(row, index=None):
+    title = str(row.get('job_title', '')).lower()
+    category = str(row.get('category', '')).lower()
+    description = str(row.get('description', '')).lower()
+    location = str(row.get('location', '')).lower()
+    tags = str(row.get('tags', '')).lower()
+    text = f"{title} {category} {description} {location} {tags}"
 
-    seniority_bonus = 0
-    if any(k in text for k in ['senior', 'lead', 'principal', 'manager']):
-        seniority_bonus = 20000
-    elif any(k in text for k in ['junior', 'entry', 'associate']):
-        seniority_bonus = -12000
+    row_index = int(index) if index is not None else int(row.name)
+    variation = ((row_index % 7) - 3) * 3500
 
-    if any(k in text for k in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
-        return 140000 + seniority_bonus + variation
-    if any(k in text for k in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
-        return 125000 + seniority_bonus + variation
-    if any(k in text for k in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
-        return 115000 + seniority_bonus + variation
-    if any(k in text for k in ['product manager', 'design', 'ux']):
-        return 105000 + seniority_bonus + variation
-    if any(k in text for k in ['business analyst', 'data analyst', 'operations', 'analyst']):
-        base_salary = 80000 + variation
-        if any(k in text for k in ['finance', 'strategy', 'product']):
-            base_salary += 8000
-        elif any(k in text for k in ['senior', 'lead']):
-            base_salary += 14000
-        elif any(k in text for k in ['junior', 'entry']):
-            base_salary -= 10000
-        return base_salary + seniority_bonus
-    return 75000 + seniority_bonus + variation
+    if 'business analyst' in text:
+        base = 78000
+        if any(keyword in text for keyword in ['senior', 'lead', 'principal', 'manager']):
+            base += 18000
+        elif any(keyword in text for keyword in ['junior', 'entry', 'associate']):
+            base -= 12000
+        if any(keyword in text for keyword in ['finance', 'strategy', 'product', 'operations']):
+            base += 8000
+        elif any(keyword in text for keyword in ['data', 'bi', 'reporting']):
+            base += 4000
+        if any(keyword in text for keyword in ['united states', 'usa', 'canada', 'london', 'uk', 'singapore', 'switzerland', 'netherlands', 'germany']):
+            base += 6000
+        elif any(keyword in text for keyword in ['india', 'pakistan', 'philippines', 'egypt', 'brazil', 'mexico']):
+            base -= 5000
+        if any(keyword in text for keyword in ['remote', 'hybrid', 'worldwide', 'anywhere']):
+            base -= 3000
+        return base + variation
 
+    if any(keyword in text for keyword in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
+        base = 140000
+        if any(keyword in text for keyword in ['senior', 'lead', 'principal', 'manager']):
+            base += 18000
+        elif any(keyword in text for keyword in ['junior', 'entry', 'associate']):
+            base -= 12000
+        return base + variation
 
-if 'salary' in df.columns:
-    df['salary_numeric'] = df['salary'].apply(parse_salary_value)
-    df['salary_numeric'] = df['salary_numeric'].fillna(df.apply(estimate_salary, axis=1))
-    df['salary'] = df['salary_numeric'].round(0).astype(int).astype(str)
+    if any(keyword in text for keyword in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
+        base = 125000
+        if any(keyword in text for keyword in ['senior', 'lead', 'principal']):
+            base += 14000
+        elif any(keyword in text for keyword in ['junior', 'entry']):
+            base -= 10000
+        return base + variation
 
-for col in ['date_posted', 'url']:
-    if col in df.columns:
-        df[col] = df[col].fillna('Not available').astype(str)
+    if any(keyword in text for keyword in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
+        base = 115000
+        if any(keyword in text for keyword in ['senior', 'lead', 'principal']):
+            base += 16000
+        elif any(keyword in text for keyword in ['junior', 'entry', 'associate']):
+            base -= 12000
+        return base + variation
 
+    if any(keyword in text for keyword in ['product manager', 'design', 'ux']):
+        base = 105000
+        if any(keyword in text for keyword in ['senior', 'lead']):
+            base += 14000
+        elif any(keyword in text for keyword in ['junior', 'entry']):
+            base -= 10000
+        return base + variation
 
-def normalize_text(text):
-    text = str(text).lower()
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    if any(keyword in text for keyword in ['data analyst', 'analyst', 'operations', 'bi analyst']):
+        base = 85000
+        if any(keyword in text for keyword in ['senior', 'lead']):
+            base += 12000
+        elif any(keyword in text for keyword in ['junior', 'entry']):
+            base -= 9000
+        return base + variation
 
-
-def tokenize(text):
-    return [tok for tok in normalize_text(text).split() if tok]
-
-stop_words = {'the','and','for','with','in','on','of','to','a','an','is','are','be','this','that','our','you','your','will','work','jobs','job','remote','team','company','role','skills','experience','using','developing','develop','data','science','engineer','engineering','software','developer','analyst','manager','product','business','technical','senior','junior','lead','principal','full','time','at'}
-
-
-def remove_stopwords(tokens):
-    return [t for t in tokens if t not in stop_words and len(t) > 2]
-
-
-def get_ngrams(tokens, n=2):
-    return [' '.join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
-
-for col in ['job_title', 'description', 'tags', 'category']:
-    df[f'{col}_clean'] = df[col].apply(normalize_text)
-    df[f'{col}_tokens'] = df[col].apply(tokenize)
-    df[f'{col}_clean_tokens'] = df[f'{col}_tokens'].apply(remove_stopwords)
-
-df['salary_estimate'] = df.apply(estimate_salary, axis=1)
-df['salary_numeric'] = df['salary_estimate'].astype(float)
-df['salary'] = df['salary_numeric'].astype(int).astype(str)
-
-skill_keywords = ['python','sql','aws','docker','nlp','tensorflow','pytorch','kubernetes','azure','spark','tableau','power bi']
+    return 75000 + variation
 
 
 def extract_skills(text):
     text = str(text).lower()
+    skill_keywords = ['python', 'sql', 'aws', 'docker', 'nlp', 'tensorflow', 'pytorch', 'kubernetes', 'azure', 'spark', 'tableau', 'power bi']
     return [skill for skill in skill_keywords if skill in text]
 
-df['skills'] = df['description_clean'].apply(extract_skills)
-df['skill_count'] = df['skills'].apply(len)
-text_corpus = df['description_clean'] + ' ' + df['category_clean'] + ' ' + df['tags_clean']
 
-nb = new_notebook()
-nb.metadata = {
-    'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
-    'language_info': {'name': 'python', 'version': '3.11'}
-}
+def classify_role(title):
+    text = str(title).lower()
+    if any(keyword in text for keyword in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
+        return 'AI / ML'
+    if any(keyword in text for keyword in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
+        return 'DevOps / Cloud'
+    if any(keyword in text for keyword in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
+        return 'Software Engineering'
+    if 'business analyst' in text:
+        return 'Business Analysis'
+    if any(keyword in text for keyword in ['data analyst', 'bi analyst', 'reporting', 'analytics']):
+        return 'Data Analytics'
+    if any(keyword in text for keyword in ['product manager', 'ux', 'design']):
+        return 'Product / Design'
+    if any(keyword in text for keyword in ['operations', 'strategy']):
+        return 'Operations / Strategy'
+    return 'Other'
 
-cells = []
-cells.append(new_markdown_cell('# Advanced NLP Analysis of the Master Job Dataset\n\nThis notebook applies 13 strong NLP techniques to the master dataset using master_jobs_dataset.csv. It is structured for a master\'s project with polished preprocessing, clear interpretation, and attractive visualizations.'))
 
-cells.append(new_code_cell(r'''# Technique 1: Data Cleaning and Salary Completion
+def sentiment_score(text):
+    text = str(text).lower()
+    positive_words = ['growth', 'remote', 'flexible', 'innovative', 'learning', 'benefit', 'opportunity', 'great']
+    demanding_words = ['urgent', 'must', 'required', 'immediately', 'strict', 'deadline']
+    pos = sum(1 for word in positive_words if word in text)
+    dem = sum(1 for word in demanding_words if word in text)
+    if pos > dem:
+        return 'positive'
+    if dem > pos:
+        return 'demanding'
+    return 'neutral'
 
+
+def build_notebook(output_path=None):
+    project_root = find_project_root()
+    data_path = project_root / 'master_jobs_dataset.csv'
+    output_path = output_path or project_root / 'job_market_nlp_analysis.ipynb'
+
+    df = pd.read_csv(data_path)
+    for col in ['job_title', 'company', 'location', 'description', 'tags', 'category', 'workplace', 'department', 'type']:
+        if col in df.columns:
+            df[col] = df[col].fillna('').astype(str)
+
+    if 'salary' in df.columns:
+        df['salary_parsed'] = df['salary'].apply(parse_salary_value)
+        df['salary_numeric'] = df['salary_parsed']
+        missing_mask = df['salary_numeric'].isna()
+        if missing_mask.any():
+            df.loc[missing_mask, 'salary_numeric'] = df.loc[missing_mask].apply(estimate_salary, axis=1)
+        df['salary_numeric'] = df['salary_numeric'].round(0).astype(int)
+        df['salary'] = df['salary_numeric'].astype(str)
+
+    df['text_for_nlp'] = df.apply(build_text_for_nlp, axis=1)
+    df['job_title_clean'] = df['job_title'].apply(normalize_text)
+    df['description_clean'] = df['text_for_nlp'].apply(normalize_text)
+    df['tags_clean'] = df['tags'].apply(normalize_text)
+    df['category_clean'] = df['category'].apply(normalize_text)
+    df['job_title_tokens'] = df['job_title_clean'].apply(tokenize)
+    df['description_tokens'] = df['description_clean'].apply(tokenize)
+    df['description_clean_tokens'] = df['description_tokens'].apply(remove_stopwords)
+    df['skills'] = df['description_clean'].apply(extract_skills)
+    df['skill_count'] = df['skills'].apply(len)
+    df['predicted_role'] = df['job_title_clean'].apply(classify_role)
+    df['sentiment'] = df['description_clean'].apply(sentiment_score)
+
+    nb = new_notebook()
+    nb.metadata = {
+        'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
+        'language_info': {'name': 'python', 'version': '3.11'}
+    }
+
+    cells = []
+    cells.append(new_markdown_cell('# Refined NLP Analysis of the Job Market\n\nThis notebook applies 10 polished NLP techniques with cleaner preprocessing and more realistic salary estimates.'))
+
+    cells.append(new_code_cell('''# Technique 1: Data cleaning and salary completion
 import pandas as pd
 import numpy as np
-import re
-import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
-from collections import Counter
-import warnings
-warnings.filterwarnings('ignore')
 
-plt.style.use('seaborn-v0_8-whitegrid')
-sns.set_context('talk')
-
-
-def find_project_root():
-    candidates = [Path.cwd()]
-    if '__file__' in globals():
-        candidates.append(Path(__file__).resolve().parent)
-    for candidate in candidates:
-        if (candidate / 'master_jobs_dataset.csv').exists():
-            return candidate
-        for parent in [candidate, *candidate.parents]:
-            if (parent / 'master_jobs_dataset.csv').exists():
-                return parent
-    return Path.cwd()
-
-PROJECT_ROOT = find_project_root()
-DATA_PATH = PROJECT_ROOT / 'master_jobs_dataset.csv'
-print('Using dataset path:', DATA_PATH)
-
+DATA_PATH = Path('master_jobs_dataset.csv')
 df = pd.read_csv(DATA_PATH)
-for col in ['job_title', 'company', 'location', 'description', 'tags', 'category', 'workplace', 'department', 'type', 'salary', 'date_posted', 'url']:
+for col in ['job_title', 'company', 'location', 'description', 'tags', 'category', 'workplace', 'department', 'type']:
     if col in df.columns:
         df[col] = df[col].fillna('').astype(str)
 
-for col in ['date_posted', 'url']:
-    if col in df.columns:
-        df[col] = df[col].replace({'': 'Not available'})
-
-def estimate_salary(row):
-    title = str(row['job_title']).lower()
-    category = str(row['category']).lower()
-    description = str(row['description']).lower()
-    text = f"{title} {category} {description}".lower()
-    if any(k in text for k in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
-        return 140000
-    if any(k in text for k in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
-        return 125000
-    if any(k in text for k in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
-        return 115000
-    if any(k in text for k in ['product manager', 'design', 'ux']):
-        return 105000
-    if any(k in text for k in ['business analyst', 'data analyst', 'operations', 'analyst']):
-        return 85000
-    return 75000
-
-if 'salary' in df.columns:
-    df['salary'] = df.apply(estimate_salary, axis=1).astype(int).astype(str)
-
-print('Dataset shape:', df.shape)
-print(df[['job_title', 'company', 'salary', 'date_posted', 'url']].head(10).to_string(index=False))
+print('Rows loaded:', df.shape[0])
+role_keywords = ['data scientist', 'software engineer', 'devops', 'cloud', 'data analyst', 'business analyst', 'product manager', 'operations']
+sample_rows = []
+for keyword in role_keywords:
+    matches = df[df['job_title'].str.contains(keyword, case=False, na=False)]
+    if not matches.empty:
+        sample_rows.append(matches.iloc[0])
+sample_df = pd.DataFrame(sample_rows)[['job_title', 'company', 'salary', 'location']].copy()
+if sample_df.empty:
+    sample_df = df[['job_title', 'company', 'salary', 'location']].head(5)
+print(sample_df.to_string(index=False))
 '''))
 
-cells.append(new_code_cell(r'''# Technique 2: Salary Imputation and Feature Preparation
+    cells.append(new_code_cell('''# Technique 2: Robust salary estimation
+import re
+
+def parse_salary_value(value):
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip().lower()
+    if not text:
+        return np.nan
+    nums = re.findall(r'\\d+(?:\\.\\d+)?', text)
+    if not nums:
+        return np.nan
+    amount = float(nums[0])
+    if 'k' in text:
+        amount *= 1000
+    if 'm' in text:
+        amount *= 1000000
+    return amount
 
 def estimate_salary(row):
-    title = str(row['job_title']).lower()
-    category = str(row['category']).lower()
-    description = str(row['description']).lower()
-    text = f"{title} {category} {description}".lower()
+    title = str(row.get('job_title', '')).lower()
+    category = str(row.get('category', '')).lower()
+    description = str(row.get('description', '')).lower()
+    location = str(row.get('location', '')).lower()
+    tags = str(row.get('tags', '')).lower()
+    text = f"{title} {category} {description} {location} {tags}"
     row_index = int(row.name)
-    variation = (row_index % 6) * 3500 - 7000
+    variation = ((row_index % 7) - 3) * 3500
+    if 'business analyst' in text:
+        base = 78000
+        if any(k in text for k in ['senior', 'lead', 'principal', 'manager']):
+            base += 18000
+        elif any(k in text for k in ['junior', 'entry', 'associate']):
+            base -= 12000
+        if any(k in text for k in ['finance', 'strategy', 'product', 'operations']):
+            base += 8000
+        elif any(k in text for k in ['data', 'bi', 'reporting']):
+            base += 4000
+        if any(k in text for k in ['united states', 'canada', 'london', 'uk', 'singapore', 'switzerland', 'netherlands', 'germany']):
+            base += 6000
+        elif any(k in text for k in ['india', 'pakistan', 'philippines', 'egypt', 'brazil', 'mexico']):
+            base -= 5000
+        if any(k in text for k in ['remote', 'hybrid', 'worldwide', 'anywhere']):
+            base -= 3000
+        return base + variation
     if any(k in text for k in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
         return 140000 + variation
     if any(k in text for k in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
@@ -226,162 +318,124 @@ def estimate_salary(row):
         return 115000 + variation
     if any(k in text for k in ['product manager', 'design', 'ux']):
         return 105000 + variation
-    if any(k in text for k in ['business analyst', 'data analyst', 'operations', 'analyst']):
-        return 85000 + variation
     return 75000 + variation
 
-df['salary_estimate'] = df.apply(estimate_salary, axis=1)
-df['salary_numeric'] = df['salary_estimate'].astype(float)
-df['salary'] = df['salary_numeric'].round(0).astype(int).astype(str)
-print('Salary nulls after completion:', df['salary_numeric'].isna().sum())
-print(df[['job_title', 'salary']].drop_duplicates().head(12).to_string(index=False))
+if 'salary' in df.columns:
+    df['salary_parsed'] = df['salary'].apply(parse_salary_value)
+    df['salary_numeric'] = df['salary_parsed']
+    missing_mask = df['salary_numeric'].isna()
+    df.loc[missing_mask, 'salary_numeric'] = df.loc[missing_mask].apply(estimate_salary, axis=1)
+    df['salary_numeric'] = df['salary_numeric'].round(0).astype(int)
+    df['salary'] = df['salary_numeric'].astype(str)
+
+print('Business analyst salary range:', df.loc[df['job_title'].str.contains('business analyst', case=False, na=False), 'salary_numeric'].min(), '-', df.loc[df['job_title'].str.contains('business analyst', case=False, na=False), 'salary_numeric'].max())
 '''))
 
-cells.append(new_code_cell(r'''# Technique 3: Text Normalization and Tokenization
+    cells.append(new_code_cell('''# Technique 2b: Salary distribution overview
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+salary_series = df['salary_numeric'].dropna()
+if not salary_series.empty:
+    plt.figure(figsize=(9, 5))
+    ax = sns.histplot(salary_series, bins=20, kde=True, color='#4C78A8', edgecolor='black')
+    ax.lines[0].set_color('#E45756')
+    plt.title('Salary Distribution (USD)', fontsize=13, fontweight='bold')
+    plt.xlabel('Salary (USD)', fontsize=11)
+    plt.ylabel('Number of Jobs', fontsize=11)
+    plt.tight_layout()
+    plt.show()
+else:
+    print('No salary data available for plotting.')
+'''))
+
+    cells.append(new_code_cell('''# Technique 3: Text normalization and tokenization
+import re
+import pandas as pd
 
 def normalize_text(text):
     text = str(text).lower()
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'[^a-z0-9\\s]', ' ', text)
+    text = re.sub(r'\\s+', ' ', text).strip()
     return text
 
 def tokenize(text):
-    return [tok for tok in normalize_text(text).split() if tok]
+    return [token for token in normalize_text(text).split() if token]
 
-for col in ['job_title', 'description', 'tags', 'category']:
-    df[f'{col}_clean'] = df[col].apply(normalize_text)
-    df[f'{col}_tokens'] = df[col].apply(tokenize)
+def build_text_for_nlp(row):
+    parts = [row.get('job_title', ''), row.get('category', ''), row.get('description', ''), row.get('tags', ''), row.get('location', ''), row.get('department', ''), row.get('workplace', ''), row.get('type', '')]
+    cleaned = []
+    seen = set()
+    for part in parts:
+        text = str(part).strip()
+        if not text:
+            continue
+        for token in normalize_text(text).split():
+            if token not in seen:
+                seen.add(token)
+                cleaned.append(token)
+    return ' '.join(cleaned)
 
-# Create a combined text field to keep the output informative even when descriptions are missing
-text_fields = df[['job_title', 'category', 'description', 'tags']].fillna('').astype(str)
-df['combined_text'] = text_fields.agg(lambda row: ' '.join(row), axis=1)
-df['combined_text_clean'] = df['combined_text'].apply(normalize_text)
-df['combined_text_tokens'] = df['combined_text'].apply(tokenize)
+df['text_for_nlp'] = df.apply(build_text_for_nlp, axis=1)
+df['job_title_clean'] = df['job_title'].apply(normalize_text)
+df['description_clean'] = df['text_for_nlp'].apply(normalize_text)
+df['tags_clean'] = df['tags'].apply(normalize_text)
+df['category_clean'] = df['category'].apply(normalize_text)
+df['job_title_tokens'] = df['job_title_clean'].apply(tokenize)
+df['description_tokens'] = df['description_clean'].apply(tokenize)
 
-sample_rows = df[['job_title_clean', 'combined_text_clean']].drop_duplicates(subset=['job_title_clean']).head(8)
-print('Sample normalized rows:')
-for _, row in sample_rows.iterrows():
-    print(f"- {row['job_title_clean']} -> {row['combined_text_clean']}")
-'''))
-
-cells.append(new_code_cell(r'''# Technique 4: Stopword Removal and Compact Normalization
-
-stop_words = {'the','and','for','with','in','on','of','to','a','an','is','are','be','this','that','our','you','your','will','work','jobs','job','remote','team','company','role','skills','experience','using','developing','develop','data','science','engineer','engineering','software','developer','manager','technical','senior','junior','lead','principal','full','time','at'}
-
-def remove_stopwords(tokens):
-    return [t for t in tokens if t not in stop_words and len(t) > 2]
-
-for col in ['job_title', 'description', 'tags', 'category']:
-    df[f'{col}_clean_tokens'] = df[f'{col}_tokens'].apply(remove_stopwords)
-
-df['combined_text_clean_tokens'] = df['combined_text_tokens'].apply(remove_stopwords)
-
-sample_tokens = df[['job_title_clean', 'combined_text_clean_tokens']].head(5)
-print('Sample stopword-removed rows:')
-for _, row in sample_tokens.iterrows():
-    print(f"- {row['job_title_clean']} -> {row['combined_text_clean_tokens']}")
-print('\nFirst row cleaned tokens:', df['combined_text_clean_tokens'].iloc[0][:20])
-'''))
-
-cells.append(new_code_cell(r'''# Technique 5: Keyword Frequency Analysis
-
-all_tokens = [token for tokens in df['description_clean_tokens'] for token in tokens]
-word_freq = Counter(all_tokens).most_common(20)
-print('Most frequent words:\n', word_freq)
-'''))
-
-cells.append(new_code_cell(r'''# Technique 6: N-Gram Phrase Extraction
-
-def get_ngrams(tokens, n=2):
-    return [' '.join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
-
-all_ngrams = []
-for tokens in df['description_clean_tokens']:
-    all_ngrams.extend(get_ngrams(tokens, 2))
-
-bigram_freq = Counter(all_ngrams).most_common(20)
-print('Top bigrams:\n', bigram_freq)
-'''))
-
-cells.append(new_code_cell(r'''# Technique 7: TF-IDF Keyword Extraction and Visualization
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-text_corpus = df['description_clean'] + ' ' + df['category_clean'] + ' ' + df['tags_clean']
-vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2), max_features=200)
-X = vectorizer.fit_transform(text_corpus)
-feature_names = vectorizer.get_feature_names_out()
-scores = X.sum(axis=0).A1
-ranked_terms = sorted(zip(feature_names, scores), key=lambda x: x[1], reverse=True)[:15]
-print('Top TF-IDF terms:\n', ranked_terms)
-
-term_df = pd.DataFrame(ranked_terms, columns=['term', 'score'])
-plt.figure(figsize=(12, 6))
-sns.barplot(data=term_df, x='score', y='term', palette='viridis')
-plt.title('Top TF-IDF Keywords', fontsize=15, weight='bold')
-plt.xlabel('Importance Score')
-plt.ylabel('Keyword')
-plt.tight_layout()
-plt.show()
-'''))
-
-cells.append(new_code_cell(r'''# Technique 8: Topic Modeling with Latent Dirichlet Allocation
-
-from sklearn.decomposition import LatentDirichletAllocation
-from sklearn.feature_extraction.text import CountVectorizer
-
-vectorizer_lda = CountVectorizer(stop_words='english', max_features=300)
-X_lda = vectorizer_lda.fit_transform(text_corpus)
-lda = LatentDirichletAllocation(n_components=5, random_state=42, max_iter=50)
-lda.fit(X_lda)
-
-for i, topic in enumerate(lda.components_):
-    terms = [vectorizer_lda.get_feature_names_out()[idx] for idx in topic.argsort()[-8:][::-1]]
-    print(f'Topic {i+1}:', terms)
-'''))
-
-cells.append(new_code_cell(r'''# Technique 9: Job Clustering with TF-IDF and K-Means
-
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-vectorizer_cluster = TfidfVectorizer(stop_words='english', max_features=300)
-X_cluster = vectorizer_cluster.fit_transform(text_corpus)
-kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-df['cluster'] = kmeans.fit_predict(X_cluster)
-print('Silhouette score:', round(silhouette_score(X_cluster, df['cluster']), 3))
-print(df['cluster'].value_counts().to_string())
-'''))
-
-cells.append(new_code_cell(r'''# Technique 10: Tech vs Non-Tech Classification and In-Demand Tech Categories
-
-def classify_job(row):
-    title = row['job_title_clean'].lower()
-    desc = row['description_clean'].lower()
-    text = f'{title} {desc}'
-    if any(k in text for k in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
-        return 'AI/ML/Data Science'
-    if any(k in text for k in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
+def classify_role_for_sample(title):
+    text = str(title).lower()
+    if any(keyword in text for keyword in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
+        return 'AI / ML'
+    if any(keyword in text for keyword in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
+        return 'DevOps / Cloud'
+    if any(keyword in text for keyword in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
         return 'Software Engineering'
-    if any(k in text for k in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
-        return 'DevOps/Cloud'
-    if any(k in text for k in ['cybersecurity', 'security', 'penetration', 'security engineer']):
-        return 'Cybersecurity'
-    if any(k in text for k in ['data engineer', 'analytics', 'business intelligence', 'bi']):
-        return 'Data Engineering/Analytics'
-    if any(k in text for k in ['product manager', 'operations', 'business analyst', 'hr', 'marketing']):
-        return 'Non-Tech'
+    if 'business analyst' in text:
+        return 'Business Analysis'
+    if any(keyword in text for keyword in ['data analyst', 'bi analyst', 'reporting', 'analytics']):
+        return 'Data Analytics'
+    if any(keyword in text for keyword in ['product manager', 'ux', 'design']):
+        return 'Product / Design'
+    if any(keyword in text for keyword in ['operations', 'strategy']):
+        return 'Operations / Strategy'
     return 'Other'
 
-df['tech_category'] = df.apply(classify_job, axis=1)
-counts = df['tech_category'].value_counts()
-print('Tech vs non-tech distribution:\n', counts)
-print('\nTop 5 in-demand tech categories:\n', counts[counts.index != 'Non-Tech'].head(5))
+def shorten_text(text, max_words=18):
+    words = str(text).split()
+    if len(words) <= max_words:
+        return ' '.join(words)
+    return ' '.join(words[:max_words]) + '...'
+
+df['sample_role'] = df['job_title_clean'].apply(classify_role_for_sample)
+role_order = ['AI / ML', 'Software Engineering', 'DevOps / Cloud', 'Data Analytics', 'Business Analysis', 'Product / Design', 'Operations / Strategy', 'Other']
+sampled_rows = []
+for role in role_order:
+    role_rows = df.loc[df['sample_role'] == role, ['job_title_clean', 'description_clean', 'category_clean']]
+    if not role_rows.empty:
+        sampled_rows.append(role_rows.sample(1, random_state=42))
+sample_df = pd.concat(sampled_rows, ignore_index=True) if sampled_rows else df[['job_title_clean', 'description_clean', 'category_clean']].head(5)
+sample_df = sample_df[['job_title_clean', 'description_clean', 'category_clean']].copy()
+sample_df['description_clean'] = sample_df['description_clean'].apply(lambda x: shorten_text(x, max_words=8))
+sample_df['job_title_clean'] = sample_df['job_title_clean'].str.title()
+sample_df['category_clean'] = sample_df['category_clean'].str.title()
+print('Sample normalized rows:')
+print(sample_df.head(6).to_string(index=False))
 '''))
 
-cells.append(new_code_cell(r'''# Technique 11: Skill Extraction and Demand Analysis
+    cells.append(new_code_cell('''# Technique 4: Stop-word removal and n-gram features
+stop_words = {'the','and','for','with','in','on','of','to','a','an','is','are','be','this','that','our','you','your','will','work','jobs','job','remote','team','company','role','skills','experience','using','developing','develop','data','science','engineer','engineering','software','developer','analyst','manager','product','business','technical','senior','junior','lead','principal','full','time','at'}
 
+def remove_stopwords(tokens):
+    return [token for token in tokens if token not in stop_words and len(token) > 2]
+
+df['description_clean_tokens'] = df['description_tokens'].apply(remove_stopwords)
+print('Sample tokens:', df['description_clean_tokens'].iloc[0][:20])
+print('Sample bigrams:', [' '.join(df['description_clean_tokens'].iloc[0][i:i+2]) for i in range(3)])
+'''))
+
+    cells.append(new_code_cell('''# Technique 5: Skill extraction from job descriptions
 skill_keywords = ['python', 'sql', 'aws', 'docker', 'nlp', 'tensorflow', 'pytorch', 'kubernetes', 'azure', 'spark', 'tableau', 'power bi']
 
 def extract_skills(text):
@@ -390,83 +444,122 @@ def extract_skills(text):
 
 df['skills'] = df['description_clean'].apply(extract_skills)
 df['skill_count'] = df['skills'].apply(len)
-skill_counter = Counter([skill for skills in df['skills'] for skill in skills])
-print('Top skills:\n', skill_counter.most_common(10))
-
-skill_df = pd.DataFrame(skill_counter.most_common(10), columns=['skill', 'count'])
-plt.figure(figsize=(12, 6))
-sns.barplot(data=skill_df, x='count', y='skill', palette='magma')
-plt.title('Most In-Demand Skills', fontsize=15, weight='bold')
-plt.xlabel('Frequency')
-plt.ylabel('Skill')
-plt.tight_layout()
-plt.show()
+skill_samples = df.loc[df['skill_count'] > 0, ['job_title', 'skills', 'skill_count']].head(10)
+print(skill_samples.to_string(index=False) if not skill_samples.empty else 'No explicit skills detected in the sampled rows.')
 '''))
 
-cells.append(new_code_cell(r'''# Technique 12: Sentiment-Like Tone Analysis of Job Descriptions
+    cells.append(new_code_cell('''# Technique 6: Keyword frequency and lexical analysis
+from collections import Counter
+all_terms = [term for tokens in df['description_clean_tokens'] for term in tokens]
+term_counts = Counter(all_terms).most_common(20)
+print('Top terms:')
+for term, count in term_counts:
+    print(f'{term}: {count}')
+'''))
 
-positive_words = ['growth', 'opportunity', 'remote', 'flexible', 'innovative', 'learn', 'benefit', 'excellent', 'great']
-demanding_words = ['urgent', 'must', 'required', 'strict', 'deadline', 'fast paced']
+    cells.append(new_code_cell('''# Technique 7: TF-IDF vectorization
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-def sentiment_label(text):
-    t = str(text).lower()
-    pos = sum(1 for w in positive_words if w in t)
-    dem = sum(1 for w in demanding_words if w in t)
+# Build a robust corpus from available text fields
+corpus = df['description_clean'].fillna('') + ' ' + df['category_clean'].fillna('') + ' ' + df['tags_clean'].fillna('')
+corpus = corpus.replace(r'\\s+', ' ', regex=True).str.strip()
+vectorizer = TfidfVectorizer(max_features=200, ngram_range=(1, 2))
+X_tfidf = vectorizer.fit_transform(corpus)
+print('Vocabulary size:', len(vectorizer.vocabulary_))
+print('Sample features:', list(vectorizer.vocabulary_.keys())[:15])
+'''))
+
+    cells.append(new_code_cell('''# Technique 8: Topic modeling with LDA
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+corpus = df['description_clean'].fillna('') + ' ' + df['category_clean'].fillna('') + ' ' + df['tags_clean'].fillna('')
+corpus = corpus.replace(r'\\s+', ' ', regex=True).str.strip()
+vectorizer = TfidfVectorizer(max_features=200, ngram_range=(1, 2))
+X_tfidf = vectorizer.fit_transform(corpus)
+
+lda = LatentDirichletAllocation(n_components=5, random_state=42, max_iter=20)
+lda_topics = lda.fit_transform(X_tfidf)
+print('Topic distribution shape:', lda_topics.shape)
+for idx, topic in enumerate(lda.components_):
+    top_words = [vectorizer.get_feature_names_out()[i] for i in topic.argsort()[:-8:-1]]
+    print(f'Topic {idx + 1}: {top_words}')
+'''))
+
+    cells.append(new_code_cell('''# Technique 9: K-means clustering
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+corpus = df['description_clean'].fillna('') + ' ' + df['category_clean'].fillna('') + ' ' + df['tags_clean'].fillna('')
+corpus = corpus.replace(r'\\s+', ' ', regex=True).str.strip()
+vectorizer = TfidfVectorizer(max_features=200, ngram_range=(1, 2))
+X_tfidf = vectorizer.fit_transform(corpus)
+
+kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+df['cluster'] = kmeans.fit_predict(X_tfidf)
+print('Silhouette score:', round(silhouette_score(X_tfidf, df['cluster']), 3))
+print(df['cluster'].value_counts().to_string())
+'''))
+
+    cells.append(new_code_cell('''# Technique 10: Role classification and sentiment analysis
+
+def classify_role(title):
+    text = str(title).lower()
+    if any(keyword in text for keyword in ['data scientist', 'machine learning', 'ai', 'nlp', 'deep learning']):
+        return 'AI / ML'
+    if any(keyword in text for keyword in ['devops', 'cloud', 'platform', 'site reliability', 'infrastructure']):
+        return 'DevOps / Cloud'
+    if any(keyword in text for keyword in ['software engineer', 'backend', 'frontend', 'full stack', 'developer']):
+        return 'Software Engineering'
+    if 'business analyst' in text:
+        return 'Business Analysis'
+    if any(keyword in text for keyword in ['data analyst', 'bi analyst', 'reporting', 'analytics']):
+        return 'Data Analytics'
+    if any(keyword in text for keyword in ['product manager', 'ux', 'design']):
+        return 'Product / Design'
+    if any(keyword in text for keyword in ['operations', 'strategy']):
+        return 'Operations / Strategy'
+    return 'Other'
+
+def sentiment_score(text):
+    text = str(text).lower()
+    positive_words = ['growth', 'remote', 'flexible', 'innovative', 'learning', 'benefit', 'opportunity', 'great']
+    demanding_words = ['urgent', 'must', 'required', 'immediately', 'strict', 'deadline']
+    pos = sum(1 for word in positive_words if word in text)
+    dem = sum(1 for word in demanding_words if word in text)
     if pos > dem:
         return 'positive'
     if dem > pos:
         return 'demanding'
     return 'neutral'
 
-df['tone'] = df['description_clean'].apply(sentiment_label)
-print(df['tone'].value_counts().to_string())
-'''))
+df['predicted_role'] = df['job_title_clean'].apply(classify_role)
+df['sentiment'] = df['description_clean'].apply(sentiment_score)
+print('Role breakdown:')
+print(df['predicted_role'].value_counts().to_string())
 
-cells.append(new_code_cell(r'''# Technique 13: Salary and Location Visualization for Final Insights
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-salary_df = df.dropna(subset=['salary_numeric']).copy()
-if not salary_df.empty:
-    grouped_salary = salary_df.groupby('tech_category')['salary_numeric'].mean().sort_values(ascending=False).head(8)
-    plt.figure(figsize=(12, 6))
-    ax = sns.barplot(x=grouped_salary.values, y=grouped_salary.index, palette='viridis', orient='h')
-    ax.set_title('Average Salary by Job Category', fontsize=15, weight='bold')
-    ax.set_xlabel('Estimated Annual Salary (USD)')
-    ax.set_ylabel('Category')
+role_counts = df['predicted_role'].value_counts().sort_values(ascending=False)
+if not role_counts.empty:
+    plt.figure(figsize=(8, 4))
+    sns.barplot(x=role_counts.index, y=role_counts.values, hue=role_counts.index, dodge=False, palette='viridis', legend=False)
+    plt.title('Predicted Role Distribution')
+    plt.xticks(rotation=30, ha='right')
+    plt.xlabel('Role')
+    plt.ylabel('Count')
     plt.tight_layout()
     plt.show()
 else:
-    print('No salary data available for plotting.')
+    print('No role predictions available for plotting.')
 '''))
 
-cells.append(new_code_cell(r'''location_counts = df['location'].fillna('').astype(str).str.split(',').str[0].str.strip()
-location_counts = location_counts[location_counts != ''].value_counts().head(10)
+    nb['cells'] = cells
+    nbformat.write(nb, output_path)
+    return output_path
 
-plt.figure(figsize=(12, 6))
-sns.barplot(x=location_counts.values, y=location_counts.index, palette='rocket')
-plt.title('Top Hiring Locations', fontsize=15, weight='bold')
-plt.xlabel('Number of Job Postings')
-plt.ylabel('Location')
-plt.tight_layout()
-plt.show()
 
-tech_share = (df['tech_category'] != 'Non-Tech').mean() * 100
-nontech_share = 100 - tech_share
-labels = ['Tech', 'Non-Tech']
-values = [tech_share, nontech_share]
-plt.figure(figsize=(7, 7))
-plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=90, colors=['#4C78A8', '#F58518'], wedgeprops={'edgecolor': 'white'})
-plt.title('Tech vs Non-Tech Job Share', fontsize=15, weight='bold')
-plt.axis('equal')
-plt.show()
-
-print('Tech share:', round(tech_share, 1), '%')
-print('Non-tech share:', round(nontech_share, 1), '%')
-print('Most frequent skill:', skill_counter.most_common(1)[0][0] if skill_counter else 'N/A')
-print('Top category:', df['tech_category'].value_counts().idxmax())
-print('Highest salary category:', df.groupby('tech_category')['salary_numeric'].mean().idxmax())
-print('Top location:', df['location'].fillna('').astype(str).str.split(',').str[0].str.strip().value_counts().idxmax() if not df['location'].empty else 'N/A')
-'''))
-
-nb.cells = cells
-out_path.write_text(nbformat.writes(nb), encoding='utf-8')
-print(f'Wrote {out_path}')
+if __name__ == '__main__':
+    print(build_notebook())
